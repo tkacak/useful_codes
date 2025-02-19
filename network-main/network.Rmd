@@ -1,0 +1,226 @@
+---
+title: "Psychometric Network Analysis"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library("dplyr")
+library("ggcorrplot")
+library("psych")
+library("bootnet")
+library("psychonetrics")
+library("EGAnet")
+library("networktree")
+```
+
+## Setting Up R
+
+* **R version:** R-4.4.2 for Windows (<https://cran.r-project.org/>)
+* **Rtools version:** Rtools44 for Windows (<https://cran.r-project.org/bin/windows/Rtools/rtools44/rtools.html>)
+* **RStudio version:** RStudio 2024.12.0+467
+* **More information on EGAnet** <https://r-ega.net/>
+
+To download the dataset:
+
+<https://raw.githubusercontent.com/okanbulut/network/master/scr_canada.csv>
+
+To download the R markdown file:
+
+<https://raw.githubusercontent.com/okanbulut/network/master/network.Rmd>
+
+To download the entire repository:
+
+<https://github.com/okanbulut/network/archive/refs/heads/main.zip>
+
+
+```{r ch1, eval=FALSE}
+install.packages(c("dplyr", "ggcorrplot", "psych", "bootnet", "psychonetrics", "EGAnet", "networktree"))
+
+library("dplyr")
+library("ggcorrplot")
+library("psych")
+library("bootnet")
+library("psychonetrics")
+library("EGAnet")
+library("networktree")
+```
+
+# Student Confident in Reading (SCR) in PIRLS 2021 
+
+The dataset comes from the PIRLS website (<https://pirls2021.org/data/>).
+
+```{r ch2}
+# Students from four provinces in Canada
+scr_canada <- read.csv("scr_canada.csv", header = TRUE)
+
+# First 6 rows of the data
+head(scr_canada)
+
+# Variable names
+names(scr_canada)
+
+# Select only the SCR items
+scr <- dplyr::select(scr_canada, starts_with("ASBR08"))
+
+# Remove students with no valid responses and recode 9 as missing
+scr %<>%
+  dplyr::filter_all(all_vars(!is.na(.))) %>%
+  dplyr::mutate_all(~na_if(., 9)) %>%
+  as.data.frame()
+```
+
+Let's check the correlation matrix of the items in SCR.
+
+```{r ch3}
+# Save the correlation matrix
+cormat <- psych::polychoric(x = scr)$rho
+
+# Correlation matrix plot
+ggcorrplot::ggcorrplot(corr = cormat, # correlation matrix
+                       type = "lower", # print only the lower part of the matrix
+                       hc.order = TRUE, # hierarchical clustering
+                       show.diag = TRUE, # show the diagonal values of 1
+                       lab = TRUE, # add correlation values as labels
+                       lab_size = 3) # Size of the labels
+```
+
+The correlation matrix above suggests that item wording effects might be presented in the SCR scale. Let's keep the original correlation matrix and start analyzing the data using a Gaussian Graphical Model (GGM).
+
+
+# Gaussian Graphical Model
+
+```{r ch4}
+network1 <- bootnet::estimateNetwork(
+  data = scr, 
+  corMethod = "cor_auto", # for polychoric and polyserial correlations
+  default = "EBICglasso", # for estimating GGM with gLASSO and EBIC
+  tuning = 0.5 # EBIC tuning parameter; set to zero for BIC model selection
+)
+
+# Print the estimated network
+print(network1)
+
+# View the estimated network
+plot(network1) 
+```
+
+Let's also try the same model using psychonetrics.
+
+```{r ch5}
+# Save item names
+obsvars <- colnames(scr)
+
+network2 <- psychonetrics::ggm(scr, vars = obsvars) %>%
+  psychonetrics::runmodel()
+
+# Check out model fit
+network2 %>% psychonetrics::fit()
+```
+
+We can prune this model to remove insignificant edges.
+
+```{r ch6}
+network3 <- psychonetrics::ggm(scr, vars = obsvars) %>%
+  psychonetrics::runmodel() %>%
+  psychonetrics::prune(adjust = "BH", alpha = 0.05)
+
+# View the model parameters
+network3 %>% psychonetrics::parameters()
+
+# Look at the model fit
+network3 %>% psychonetrics::fit()
+
+# Compare the models
+comparison <- psychonetrics::compare(
+  `1. Original model`  = network2,
+  `2. Sparse Model: Only Pruning` = network3)
+
+print(comparison)
+```
+
+# Exploratory Graph Analysis
+
+```{r ch7}
+# Dimension stability analysis via EGAnet
+bootEGA1 <- EGAnet::bootEGA(
+  data = scr, 
+  cor = "cor_auto",
+  uni.method = "louvain",
+  iter = 500, # Number of replica samples to generate
+  # resampling" for n random subsamples of the original data
+  # parametric" for n synthetic samples from multivariate normal dist.
+  type = "parametric", 
+  # EGA Uses standard exploratory graph analysis
+  # EGA.fit Uses total entropy fit index (tefi) to determine best fit of EGA
+  # hierEGA Uses hierarchical exploratory graph analysis
+  EGA.type = "EGA", 
+  model = "glasso", 
+  algorithm = "walktrap", # or "louvain" (better for unidimensional structures)
+  # use "highest_modularity", "most_common", or "lowest_tefi"
+  consensus.method = "highest_modularity", 
+  typicalStructure = TRUE, # typical network of partial correlations
+  plot.typicalStructure = TRUE, # returns a plot of the typical network
+  ncores = 8, # Number of cores to use in computing results
+  seed = 2024 # set the seed for replicability
+)
+
+# View the number of communities
+bootEGA1$EGA
+bootEGA1$typicalGraph$typical.dim.variables
+
+# Dimension (i.e., structural) stability results
+dim_scr <- EGAnet::dimensionStability(bootEGA1)
+dim_scr$dimension.stability
+
+# Item stability results
+dim_scr$item.stability
+dim_scr$item.stability$plot # to see only the plot
+```
+
+
+# Random-Intercept EGA
+
+Random-Intercept EGA estimates the number of dimensions after controlling for wording effects. EGA is applied to a residual correlation matrix after subtracting a random intercept factor model with equal unstandardized loadings from all the regular and unrecoded reversed items in the data.
+
+```{r ch8}
+riEGA <- EGAnet::bootEGA(
+  scr, 
+  uni.method = "LE",
+  iter = 500,
+  type = "parametric",
+  cor = "cor_auto",
+  model = "glasso",
+  EGA.type = "riEGA", # select random-intercept EGA here
+  consensus.method	= "highest_modularity", 
+  consensus.iter = 100,
+  algorithm="walktrap",
+  seed = 2024
+)
+
+print(riEGA)
+```
+
+# Network Tree Analysis
+
+In the final step, we will analyze whether the network structure of the SCR scale differs by gender and reading achievement (i.e., above or below the mean reading achievement score) using network tree analysis. 
+
+```{r ch9}
+scr2 <- dplyr::select(scr_canada, starts_with("ASBR08"), IDCNTRY, ITSEX, ASRREA01) %>%
+  dplyr::filter_all(all_vars(!is.na(.))) %>%
+  dplyr::mutate_all(~na_if(., 9)) %>%
+  dplyr::mutate(gender = as.factor(ifelse(ITSEX==1,"girl", 
+                                          ifelse(scr_canada$ITSEX==2, "boy", NA))),
+                reading = as.factor(ifelse(ASRREA01 < 500, "below average", "above average")),
+                province = as.factor(ifelse(IDCNTRY == 9130, "Newfoundland and Labrador", ifelse(IDCNTRY == 9133, "Quebec", ifelse(IDCNTRY == 9134, "Alberta", "British Columbia"))))) %>%
+  as.data.frame()
+
+
+nmt_scr <- networktree::networktree(nodevars=scr, 
+                                    splitvars=scr2[,c("gender", "reading", "province")],
+                                    transform="pcor",
+                                    na.action=na.omit)
+
+plot_scr <- plot(nmt_scr, transform="pcor", maximum=0.2, edge.width=5, vsize=10, theme="colorblind", tnex = 3, partyargs=list(ep_args = list(justmin = 15), gp = grid::gpar(cex = .5)))
+```
+
